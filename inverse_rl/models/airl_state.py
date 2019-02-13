@@ -11,7 +11,7 @@ from inverse_rl.utils import TrainingIterator
 
 class AIRL(SingleTimestepIRL):
     """ 
-
+    State-only rewards AIRL
 
     Args:
         fusion (bool): Use trajectories from old iterations to train.

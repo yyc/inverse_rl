@@ -208,6 +208,9 @@ class CustomAntEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         with model.asfile() as f:
             mujoco_env.MujocoEnv.__init__(self, f.name, 5)
 
+    def step(self, a):
+        return self._step(a)
+
     def _step(self, a):
         vel = self.model.data.qvel.flat[0]
         forward_reward = vel

@@ -36,4 +36,6 @@ if __name__ == "__main__":
     params_dict = {
         'ent_wt': [0.1]
     }
+    print("running")
+#    main("test_run", **params_dict)
     run_sweep_parallel(main, params_dict, repeat=4)
