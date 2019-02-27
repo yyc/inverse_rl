@@ -6,6 +6,7 @@ from inverse_rl.algos.irl_batch_polopt import IRLBatchPolopt
 from sandbox.rocky.tf.misc import tensor_utils
 import tensorflow as tf
 import numpy as np
+import time
 from sandbox.rocky.tf.optimizers.conjugate_gradient_optimizer import ConjugateGradientOptimizer
 
 
@@ -140,6 +141,31 @@ class IRLNPO(IRLBatchPolopt):
         logger.record_tabular('MeanKL', mean_kl)
         logger.record_tabular('dLoss', loss_before - loss_after)
         return dict()
+
+    def calc_influence(self, itr=201, **kwargs):
+        sess = tf.get_default_session()
+        self.start_worker()
+        start_time = time.time()
+        returns = []
+
+        with logger.prefix('influence | '):
+            start_time = time.time()
+            logger.log("Obtaining samples...")
+            paths = self.obtain_samples(itr)
+
+            logger.log("Calculating Influences...")
+            influences = self.irl_model.calc_influence(paths, self.policy, hessian_iter=itr, **kwargs)
+
+            logger.log("Saved")
+            logger.record_tabular('Time', time.time() - start_time)
+            logger.dump_tabular(with_prefix=False)
+            if self.plot:
+                self.update_plot()
+                if self.pause_for_plot:
+                    input("Plotting evaluation run: Press Enter to "
+                          "continue...")
+        self.shutdown_worker()
+        return influences
 
     @overrides
     def get_itr_snapshot(self, itr, samples_data):

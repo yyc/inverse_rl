@@ -6,7 +6,8 @@ from inverse_rl.models.fusion_manager import RamFusionDistr
 from inverse_rl.models.imitation_learning import SingleTimestepIRL
 from inverse_rl.models.architectures import relu_net
 from inverse_rl.utils import TrainingIterator
-
+from inverse_rl.utils.infl_utils import *
+from tensorflow.python.ops.gradients_impl import _hessian_vector_product as hvp
 
 
 class AIRL(SingleTimestepIRL):
@@ -46,8 +47,8 @@ class AIRL(SingleTimestepIRL):
         self.gamma = discount
         assert value_fn_arch is not None
         self.set_demos(expert_trajs)
-        self.state_only=state_only
-        self.max_itrs=max_itrs
+        self.state_only = state_only
+        self.max_itrs = max_itrs
 
         # build energy model
         with tf.variable_scope(name) as _vs:
@@ -64,9 +65,10 @@ class AIRL(SingleTimestepIRL):
                 rew_input = self.obs_t
                 if not self.state_only:
                     rew_input = tf.concat([self.obs_t, self.act_t], axis=1)
-                with tf.variable_scope('reward'):
-                    self.reward = reward_arch(rew_input, dout=1, **reward_arch_args)
-                    #energy_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=vs.name)
+                with tf.variable_scope('reward') as rvs:
+                    # Get reward weights for gradient computation later
+                    self.reward = reward_arch(rew_input, individual_vars=True, dout=1, **reward_arch_args)
+                    self.reward_weights = tf.get_collection('indiv_vars', scope=rvs.name)
 
                 # value function shaping
                 with tf.variable_scope('vfn'):
@@ -82,12 +84,100 @@ class AIRL(SingleTimestepIRL):
 
             log_pq = tf.reduce_logsumexp([log_p_tau, log_q_tau], axis=0)
             self.discrim_output = tf.exp(log_p_tau-log_pq)
-            cent_loss = -tf.reduce_mean(self.labels*(log_p_tau-log_pq) + (1-self.labels)*(log_q_tau-log_pq))
+
+            # Use the full loss so we can operate separately on different parts
+            self.full_loss = -1 * (self.labels*(log_p_tau-log_pq) + (1-self.labels)*(log_q_tau-log_pq))
+            cent_loss = tf.reduce_mean(self.full_loss)
 
             self.loss = cent_loss
             tot_loss = self.loss
             self.step = tf.train.AdamOptimizer(learning_rate=self.lr).minimize(tot_loss)
             self._make_param_ops(_vs)
+
+
+    def calc_influence(self, paths, policy, ztest_size=25, t_size=50, hessian_iter=10, trajectories=None):
+        # modified from the fit() function
+        if self.fusion is not None:
+            old_paths = self.fusion.sample_paths(n=len(paths))
+            self.fusion.add_paths(paths)
+            paths = paths+old_paths
+
+        # eval samples under current policy
+        self._compute_path_probs(paths, insert=True)
+
+        # eval expert log probs under current policy
+        self.eval_expert_probs(self.expert_trajs, policy, insert=True)
+
+        self._insert_next_state(paths)
+        self._insert_next_state(self.expert_trajs)
+        obs, obs_next, acts, acts_next, path_probs = \
+            self.extract_paths(paths,
+                               keys=('observations', 'observations_next', 'actions', 'actions_next', 'a_logprobs'))
+        expert_obs, expert_obs_next, expert_acts, expert_acts_next, expert_probs = \
+            self.extract_paths(self.expert_trajs,
+                               keys=('observations', 'observations_next', 'actions', 'actions_next', 'a_logprobs'))
+
+        # ztest for discriminator
+        nobs_batch, obs_batch, nact_batch, act_batch, lprobs_batch = \
+            self.sample_batch(obs_next, obs, acts_next, acts, path_probs, batch_size=ztest_size)
+
+        # sample ztests and t zs for hessian approximation
+        nexpert_obs_batch, expert_obs_batch, nexpert_act_batch, expert_act_batch, expert_lprobs_batch = \
+            self.sample_batch(expert_obs_next, expert_obs, expert_acts_next, expert_acts, expert_probs, batch_size=ztest_size + t_size)
+
+        # if specify a subset of trajectories, calculate influences only for those trajectories
+        expert_trajs = self.expert_trajs
+
+        if trajectories is not None:
+            expert_trajs = np.take(self.expert_trajs, trajectories)
+            expert_obs, expert_obs_next, expert_acts, expert_acts_next, expert_probs = \
+                self.extract_paths(expert_trajs,
+                                   keys=('observations', 'observations_next', 'actions', 'actions_next', 'a_logprobs'))
+
+        # Build array for full_loss that contains z_test, z_s, and all expert trajs
+        # Build feed dict
+        labels = np.zeros((ztest_size*2 + t_size + len(expert_obs), 1))
+        labels[ztest_size:] = 1.0
+        obs_batch = np.concatenate([obs_batch, expert_obs_batch, expert_obs], axis=0)
+        nobs_batch = np.concatenate([nobs_batch, nexpert_obs_batch, expert_obs_next], axis=0)
+        act_batch = np.concatenate([act_batch, expert_act_batch, expert_acts], axis=0)
+        nact_batch = np.concatenate([nact_batch, nexpert_act_batch, expert_acts_next], axis=0)
+        lprobs_batch = np.expand_dims(np.concatenate([lprobs_batch, expert_lprobs_batch, expert_probs], axis=0), axis=1).astype(np.float32)
+        feed_dict = {
+            self.act_t: act_batch,
+            self.obs_t: obs_batch,
+            self.nobs_t: nobs_batch,
+            self.nact_t: nact_batch,
+            self.labels: labels,
+            self.lprobs: lprobs_batch,
+            }
+
+        # split lengths for individual exper trajectories
+        splits_lengths = [len(t['observations']) for t in expert_trajs]
+
+        ztests, zs, *traj_sa_losses = tf.split(self.full_loss, [ztest_size*2, t_size] + splits_lengths)
+
+        # z_test losses, automatically summed
+        l_ztest = tf.gradients(ztests, self.reward_weights, stop_gradients=self.reward_weights)
+
+        # Trajectory losses computed by averaging the individual state-action losses in the trajectory
+        traj_losses = \
+            [tf.gradients(traj, self.reward_weights, stop_gradients=self.reward_weights) / len(traj)
+             for traj in traj_sa_losses]
+
+        # Calculate the z_test losses (s_test in the Fu paper), and the trajectory losses
+        diff_lz, traj_losses = tf.get_default_session().run([l_ztest, traj_losses], feed_dict=feed_dict)
+
+        # hessian_compute_inverse_vs also outputs the estimates at each iteration for me to track convergence
+        # takes in the list of vectors to hopefully do it in parallel
+        conv, hess_inv_vs = hessian_compute_inverse_vs(zs, self.reward_weights, traj_losses, feed_dict=feed_dict)
+
+        # Calculate influence function
+        influences = [-1 * np.dot(diff_lz, hess_inv) for hess_inv in hess_inv_vs]
+
+        # Output the trajectories as well so we can check them manually
+        return expert_trajs, conv, influences
+
 
     def fit(self, paths, policy=None, batch_size=32, logger=None, lr=1e-3,**kwargs):
 
