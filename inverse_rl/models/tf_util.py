@@ -2,11 +2,20 @@ import tensorflow as tf
 import numpy as np
 
 REG_VARS = 'reg_vars'
+INDIV_VARS = 'indiv_vars'
 
-def linear(X, dout, name, bias=True):
+def linear(X, dout, name, bias=True, individual_vars=False):
     with tf.variable_scope(name):
+        def _get_var_and_register(var_name):
+            var = tf.get_variable(var_name, shape=())
+            tf.add_to_collection(INDIV_VARS, var)
+            return var
+
         dX = int(X.get_shape()[-1])
-        W = tf.get_variable('W', shape=(dX, dout))
+        if individual_vars:
+            W = tf.stack([[_get_var_and_register('W-%i-%i' % (i, j)) for j in range(dout)] for i in range(dX)])
+        else:
+            W = tf.get_variable('W', shape=(dX, dout))
         tf.add_to_collection(REG_VARS, W)
         if bias:
             b = tf.get_variable('b', initializer=tf.constant(np.zeros(dout).astype(np.float32)))
@@ -24,8 +33,8 @@ def discounted_reduce_sum(X, discount, axis=-1):
 def assert_shape(tens, shape):
     assert tens.get_shape().is_compatible_with(shape)
 
-def relu_layer(X, dout, name):
-    return tf.nn.relu(linear(X, dout, name))
+def relu_layer(X, dout, name, individual_vars=False):
+    return tf.nn.relu(linear(X, dout, name, individual_vars=individual_vars))
 
 def softplus_layer(X, dout, name):
     return tf.nn.softplus(linear(X, dout, name))

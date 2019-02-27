@@ -12,11 +12,12 @@ def make_relu_net(layers=2, dout=1, d_hidden=32):
     return relu_net
 
 
-def relu_net(x, layers=2, dout=1, d_hidden=32):
+def relu_net(x, layers=2, dout=1, d_hidden=32, individual_vars=False):
     out = x
+    weights=[]
     for i in range(layers):
-        out = relu_layer(out, dout=d_hidden, name='l%d'%i)
-    out = linear(out, dout=dout, name='lfinal')
+        out = relu_layer(out, dout=d_hidden, name='l%d'%i, individual_vars=individual_vars)
+    out = linear(out, dout=dout, name='lfinal', individual_vars=individual_vars)
     return out
 
 
