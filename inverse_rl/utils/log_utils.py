@@ -46,12 +46,16 @@ def get_expert_fnames(log_dir, n=5):
 def load_experts(fname, max_files=float('inf'), min_return=None):
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
+    snapshot_dict = {}
     if hasattr(fname, '__iter__'):
         paths = []
         for fname_ in fname:
             tf.reset_default_graph()
             with tf.Session(config=config):
                 snapshot_dict = joblib.load(fname_)
+            is_poisoned = 'poisoned' in snapshot_dict
+            for p in snapshot_dict['paths']:
+                p['poisoned'] = is_poisoned
             paths.extend(snapshot_dict['paths'])
     else:
         with tf.Session(config=config):
@@ -59,14 +63,16 @@ def load_experts(fname, max_files=float('inf'), min_return=None):
         paths = snapshot_dict['paths']
     tf.reset_default_graph()
 
+
     trajs = []
     for path in paths:
         obses = path['observations']
         actions = path['actions']
         returns = path['returns']
+        is_poisoned = path['poisoned']
         total_return = np.sum(returns)
         if (min_return is None) or (total_return >= min_return):
-            traj = {'observations': obses, 'actions': actions}
+            traj = {'observations': obses, 'actions': actions, 'poisoned': is_poisoned}
             trajs.append(traj)
     random.shuffle(trajs)
     print('Loaded %d trajectories' % len(trajs))
