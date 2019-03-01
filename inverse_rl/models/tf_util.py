@@ -36,11 +36,11 @@ def assert_shape(tens, shape):
 def relu_layer(X, dout, name, individual_vars=False):
     return tf.nn.relu(linear(X, dout, name, individual_vars=individual_vars))
 
-def softplus_layer(X, dout, name):
-    return tf.nn.softplus(linear(X, dout, name))
+def softplus_layer(X, dout, name, individual_vars=False):
+    return tf.nn.softplus(linear(X, dout, name, individual_vars=individual_vars))
 
-def tanh_layer(X, dout, name):
-    return tf.nn.tanh(linear(X, dout, name))
+def tanh_layer(X, dout, name, individual_vars=False):
+    return tf.nn.tanh(linear(X, dout, name, individual_vars))
 
 def get_session_config():
     session_config = tf.ConfigProto()

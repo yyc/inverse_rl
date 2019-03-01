@@ -55,3 +55,12 @@ class TrainingIterator(object):
                 prev_time = cur_time
             yield self
             self.__heartbeat = False
+
+
+def interleave_lists(a, b):
+    shape = a.shape
+    shape = (a.shape[0] + b.shape[0],) + shape[1:]
+    c = np.empty(shape, dtype=a.dtype)
+    c[0::2] = a
+    c[1::2] = b
+    return c

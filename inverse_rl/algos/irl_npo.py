@@ -148,22 +148,16 @@ class IRLNPO(IRLBatchPolopt):
         start_time = time.time()
         returns = []
 
-        with logger.prefix('influence | '):
+        with logger.prefix('influence %d | ' % itr):
             start_time = time.time()
             logger.log("Obtaining samples...")
             paths = self.obtain_samples(itr)
 
             logger.log("Calculating Influences...")
-            influences = self.irl_model.calc_influence(paths, self.policy, hessian_iter=itr, **kwargs)
+            influences = self.irl_model.calc_influence(paths, self.policy, hessian_iter=itr,logger=logger, **kwargs)
 
-            logger.log("Saved")
+            logger.log("Finished")
             logger.record_tabular('Time', time.time() - start_time)
-            logger.dump_tabular(with_prefix=False)
-            if self.plot:
-                self.update_plot()
-                if self.pause_for_plot:
-                    input("Plotting evaluation run: Press Enter to "
-                          "continue...")
         self.shutdown_worker()
         return influences
 

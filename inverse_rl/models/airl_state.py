@@ -5,10 +5,12 @@ from sandbox.rocky.tf.spaces.box import Box
 from inverse_rl.models.fusion_manager import RamFusionDistr
 from inverse_rl.models.imitation_learning import SingleTimestepIRL
 from inverse_rl.models.architectures import relu_net
-from inverse_rl.utils import TrainingIterator
+from inverse_rl.utils import TrainingIterator, interleave_lists as interleave
 from inverse_rl.utils.infl_utils import *
 from tensorflow.python.ops.gradients_impl import _hessian_vector_product as hvp
 
+import time
+import pickle
 
 class AIRL(SingleTimestepIRL):
     """ 
@@ -49,6 +51,9 @@ class AIRL(SingleTimestepIRL):
         self.set_demos(expert_trajs)
         self.state_only = state_only
         self.max_itrs = max_itrs
+        self.hessian_op = None
+        self.l_ztest = None
+        self.traj_losses = None
 
         # build energy model
         with tf.variable_scope(name) as _vs:
@@ -95,12 +100,23 @@ class AIRL(SingleTimestepIRL):
             self._make_param_ops(_vs)
 
 
-    def calc_influence(self, paths, policy, ztest_size=25, t_size=50, hessian_iter=10, trajectories=None):
+    def calc_influence(self, paths, policy, ztest_size=25, t_size=50, logger=None,
+                       hessian_iter=10, trajectories=None, compute_hessian=True):
         # modified from the fit() function
         if self.fusion is not None:
             old_paths = self.fusion.sample_paths(n=len(paths))
             self.fusion.add_paths(paths)
             paths = paths+old_paths
+
+        start_time = time.time()
+        last_time = start_time
+
+
+        def log_diff(s):
+            nonlocal last_time
+            logger.log(
+                '%s | t=%f (+%f)' % (s, time.time() - start_time, time.time() - last_time))
+            last_time = time.time()
 
         # eval samples under current policy
         self._compute_path_probs(paths, insert=True)
@@ -117,9 +133,10 @@ class AIRL(SingleTimestepIRL):
             self.extract_paths(self.expert_trajs,
                                keys=('observations', 'observations_next', 'actions', 'actions_next', 'a_logprobs'))
 
-        # ztest for discriminator
+
+        #sample ztests and t zs each for hessian
         nobs_batch, obs_batch, nact_batch, act_batch, lprobs_batch = \
-            self.sample_batch(obs_next, obs, acts_next, acts, path_probs, batch_size=ztest_size)
+            self.sample_batch(obs_next, obs, acts_next, acts, path_probs, batch_size=ztest_size + t_size)
 
         # sample ztests and t zs for hessian approximation
         nexpert_obs_batch, expert_obs_batch, nexpert_act_batch, expert_act_batch, expert_lprobs_batch = \
@@ -136,13 +153,14 @@ class AIRL(SingleTimestepIRL):
 
         # Build array for full_loss that contains z_test, z_s, and all expert trajs
         # Build feed dict
-        labels = np.zeros((ztest_size*2 + t_size + len(expert_obs), 1))
-        labels[ztest_size:] = 1.0
-        obs_batch = np.concatenate([obs_batch, expert_obs_batch, expert_obs], axis=0)
-        nobs_batch = np.concatenate([nobs_batch, nexpert_obs_batch, expert_obs_next], axis=0)
-        act_batch = np.concatenate([act_batch, expert_act_batch, expert_acts], axis=0)
-        nact_batch = np.concatenate([nact_batch, nexpert_act_batch, expert_acts_next], axis=0)
-        lprobs_batch = np.expand_dims(np.concatenate([lprobs_batch, expert_lprobs_batch, expert_probs], axis=0), axis=1).astype(np.float32)
+        labels = np.concatenate(
+            [interleave(np.zeros((ztest_size + t_size, 1)), np.ones((ztest_size + t_size, 1))), np.ones((len(expert_obs), 1))]
+        )
+        obs_batch = np.concatenate([interleave(obs_batch, expert_obs_batch), expert_obs], axis=0)
+        nobs_batch = np.concatenate([interleave(nobs_batch, nexpert_obs_batch), expert_obs_next], axis=0)
+        act_batch = np.concatenate([interleave(act_batch, expert_act_batch), expert_acts], axis=0)
+        nact_batch = np.concatenate([interleave(nact_batch, nexpert_act_batch), expert_acts_next], axis=0)
+        lprobs_batch = np.expand_dims(np.concatenate([interleave(lprobs_batch, expert_lprobs_batch), expert_probs], axis=0), axis=1).astype(np.float32)
         feed_dict = {
             self.act_t: act_batch,
             self.obs_t: obs_batch,
@@ -152,21 +170,62 @@ class AIRL(SingleTimestepIRL):
             self.lprobs: lprobs_batch,
             }
 
-        # split lengths for individual exper trajectories
+        # split lengths for individual expert trajectories
         splits_lengths = [len(t['observations']) for t in expert_trajs]
 
-        ztests, zs, *traj_sa_losses = tf.split(self.full_loss, [ztest_size*2, t_size] + splits_lengths)
+        ztests, zs, *traj_sa_losses = tf.split(self.full_loss, [ztest_size*2, 2*t_size] + splits_lengths)
 
-        # z_test losses, automatically summed
-        l_ztest = tf.gradients(ztests, self.reward_weights, stop_gradients=self.reward_weights)
+        log_diff('Building Ztest Gradient Op')
+
+        # z_test losses, automatically summed, divide to get mean
+        if self.l_ztest is None:
+            self.l_ztest = tf.math.divide(tf.convert_to_tensor(
+                tf.gradients(ztests, self.reward_weights, stop_gradients=self.reward_weights)
+            ), ztest_size * 2)
+
+        log_diff('Building trajectories gradient op')
 
         # Trajectory losses computed by averaging the individual state-action losses in the trajectory
-        traj_losses = \
-            [tf.gradients(traj, self.reward_weights, stop_gradients=self.reward_weights) / len(traj)
-             for traj in traj_sa_losses]
+        # Divide to get mean
+        if self.traj_losses is None:
+            self.traj_losses = \
+                [tf.math.divide(tf.gradients(traj, self.reward_weights, stop_gradients=self.reward_weights), tf.size(traj))
+                 for traj in traj_sa_losses]
 
+        log_diff('Running ztest and trajectory ops')
         # Calculate the z_test losses (s_test in the Fu paper), and the trajectory losses
-        diff_lz, traj_losses = tf.get_default_session().run([l_ztest, traj_losses], feed_dict=feed_dict)
+        diff_lz, traj_losses = tf.get_default_session().run([self.l_ztest, self.traj_losses], feed_dict=feed_dict)
+
+
+        # Calculate the full hessian and invert it
+        if compute_hessian:
+            hessian_val = None
+            hessian_inv = None
+            try:
+                log_diff('Building Hessian Op')
+                if self.hessian_op is None:
+                    self.hessian_op = hessian(zs, self.reward_weights)
+
+                log_diff('Running Hessian Op')
+                hessian_val = tf.get_default_session().run(self.hessian_op, feed_dict=feed_dict)
+
+                log_diff('Building Inverse Op')
+                hessian_inv_op = tf.linalg.inv(hessian_val)
+
+                log_diff("Running Inverse Op")
+                hessian_inv = tf.get_default_session().run(hessian_inv_op)
+
+                log_diff("Multiplying to calculate influences")
+                hess_inv_vs = [np.matmul(hessian_inv, v) for v in traj_losses]
+                influences = [ -1 * np.dot(diff_lz, hinvv) for hinvv in hess_inv_vs]
+            except Exception as e:
+                logger.log(str(e))
+                # Capture quits as well as tf errors
+                filename = 'error_hessian.pkl'
+                log_diff("Error Encountered, dumping to %s " % filename)
+                pickle.dump((diff_lz, traj_losses, hessian_val, hessian_inv), open(filename, 'wb'))
+                raise e
+            return expert_trajs, (diff_lz, traj_losses, hessian_val, hessian_inv), influences
 
         # hessian_compute_inverse_vs also outputs the estimates at each iteration for me to track convergence
         # takes in the list of vectors to hopefully do it in parallel
