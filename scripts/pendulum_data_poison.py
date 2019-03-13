@@ -7,14 +7,15 @@ import rllab.misc.logger as logger
 import tensorflow as tf
 from rllab.misc.overrides import overrides
 
-
+from inverse_rl.utils.poisoned_policy import PoisonedPolicy
 from inverse_rl.utils.log_utils import rllab_logdir, load_experts
 
 def main():
     env = TfEnv(GymEnv('Pendulum-v0', record_video=False, record_log=False))
     policy = PoisonedPolicy(name='policy', env_spec=env.spec, hidden_sizes=(32, 32))
 
-    num_itr = 1
+    num_itr = 200
+    # num_itr = 1
 
     # experts = load_experts(['data/pendulum_poisoned/itr_1.pkl'])
     # print(experts)
@@ -40,28 +41,6 @@ def main():
         samples = algo.process_samples(num_itr, paths)
         samples['poisoned'] = True
         logger.save_itr_params(num_itr, samples)
-
-class PoisonedPolicy(GaussianMLPPolicy):
-    def __init__(self, name, env_spec, hidden_sizes):
-        self.poison = False
-        super().__init__(name, env_spec, hidden_sizes=hidden_sizes)
-
-    @overrides
-    def get_action(self, observation):
-        if not self.poison:
-            return super().get_actions(observation)
-        action = self.action_space.sample()
-        return action, None
-
-    @overrides
-    def get_actions(self, observations):
-        actions, info = super().get_actions(observations)
-        if not self.poison:
-            return actions, info
-        logger.log('generating action')
-        actions = [self.action_space.sample() for _ in observations]
-        return actions, info
-
 
 if __name__ == "__main__":
     main()
