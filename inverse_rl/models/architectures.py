@@ -1,5 +1,5 @@
 import tensorflow as tf
-from inverse_rl.models.tf_util import relu_layer, linear
+from inverse_rl.models.tf_util import relu_layer, linear, softplus_layer
 
 
 def make_relu_net(layers=2, dout=1, d_hidden=32):
@@ -20,6 +20,13 @@ def relu_net(x, layers=2, dout=1, d_hidden=32, individual_vars=False):
     out = linear(out, dout=dout, name='lfinal', individual_vars=individual_vars)
     return out
 
+def softplus_net(x, layers=2, dout=1, d_hidden=32, individual_vars=False):
+    out = x
+    weights=[]
+    for i in range(layers):
+        out = softplus_layer(out, dout=d_hidden, name='l%d'%i, individual_vars=individual_vars)
+    out = linear(out, dout=dout, name='lfinal', individual_vars=individual_vars)
+    return out
 
 def linear_net(x, dout=1):
     out = x

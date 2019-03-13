@@ -51,6 +51,12 @@ def hessian(ys, xs, gradients_kwargs=None):
 
     n = len(xs)
 
+    if tf.contrib.framework.is_tensor(ys):
+        sample_size = tf.shape(ys)[0]
+    else:
+        sample_size = len(ys)
+
+    sample_size = tf.cast(sample_size, tf.float32)
     # xs = tf.stack(xs)
 
     def hessian_compute_row(j, tensor_array):
@@ -73,7 +79,7 @@ def hessian(ys, xs, gradients_kwargs=None):
 
         second_order = tf.gradients(gradient, xs, stop_gradients = xs, **gradients_kwargs)
         for i in range(n):
-            tensor_array = tensor_array.write(offset + i, second_order[i])
+            tensor_array = tensor_array.write(offset + i, tf.math.divide(second_order[i], sample_size))
         return j+1, tensor_array
 
     # Row Iterator

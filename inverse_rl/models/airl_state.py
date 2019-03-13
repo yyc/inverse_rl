@@ -99,7 +99,6 @@ class AIRL(SingleTimestepIRL):
             self.step = tf.train.AdamOptimizer(learning_rate=self.lr).minimize(tot_loss)
             self._make_param_ops(_vs)
 
-
     def calc_influence(self, paths, policy, ztest_size=25, t_size=50, logger=None,
                        hessian_iter=10, trajectories=None, compute_hessian=True):
         # modified from the fit() function
@@ -154,7 +153,8 @@ class AIRL(SingleTimestepIRL):
         # Build array for full_loss that contains z_test, z_s, and all expert trajs
         # Build feed dict
         labels = np.concatenate(
-            [interleave(np.zeros((ztest_size + t_size, 1)), np.ones((ztest_size + t_size, 1))), np.ones((len(expert_obs), 1))]
+            [interleave(np.zeros((ztest_size + t_size, 1)), np.ones((ztest_size + t_size, 1)))
+                , np.ones((len(expert_obs), 1))]
         )
         obs_batch = np.concatenate([interleave(obs_batch, expert_obs_batch), expert_obs], axis=0)
         nobs_batch = np.concatenate([interleave(nobs_batch, nexpert_obs_batch), expert_obs_next], axis=0)
