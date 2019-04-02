@@ -1,27 +1,41 @@
 import tensorflow as tf
+import sys
+import numpy as np
 
 from sandbox.rocky.tf.policies.gaussian_mlp_policy import GaussianMLPPolicy
 from sandbox.rocky.tf.envs.base import TfEnv
 from rllab.baselines.linear_feature_baseline import LinearFeatureBaseline
 from rllab.envs.gym_env import GymEnv
+import rllab.misc.logger as logger
 
 import pickle
 
 from inverse_rl.algos.irl_trpo import IRLTRPO
 # from inverse_rl.models.imitation_learning import AIRLStateAction
 from inverse_rl.models.airl_state import AIRL
-from inverse_rl.utils.log_utils import rllab_logdir, load_latest_experts
+from inverse_rl.utils.log_utils import rllab_logdir, load_latest_experts, load_experts
 
 
 from inverse_rl.models.architectures import softplus_net
 from inverse_rl.utils.poisoned_policy import PoisonedPolicy
 
-def main(load_checkpoint=None, debug=False):
+def main(load_checkpoint=None, debug=False, fnames=None, job_id=None):
     env = TfEnv(GymEnv('Pendulum-v0', record_video=False, record_log=False))
 
-    experts = load_latest_experts('data/pendulum_poisoned_2', n=10)
+    if fnames is None:
+        ## Optimal demonstrations
+        experts = load_latest_experts('data/pendulum', n=10)
+    ## Noisy pendulum samples
+    # experts = load_latest_experts('data/pendulum_poisoned', n=5)
+    ## Negated pendulum samples
+    # experts = load_latest_experts('data/pendulum_poisoned_2', n=5)
+    else:
+        experts = load_experts(fnames)
 
-    num_itr = 200
+    if job_id == None:
+        job_id = np.random.randint(10, 1000)
+
+    num_itr = 400
     hidden_size = 32
     trajectories_subset = None
     if debug:
@@ -29,6 +43,9 @@ def main(load_checkpoint=None, debug=False):
         # Use fewer hidden layers so the hessian computation is faster in debugging
         hidden_size = 10
         trajectories_subset = [1,2,3]
+    else:
+        logger.set_snapshot_gap(100)
+        logger.set_snapshot_mode("gap")
 
 #    irl_model = AIRLStateAction(env_spec=env.spec, expert_trajs=experts)
     irl_model = AIRL(env=env, expert_trajs=experts, state_only=True,
@@ -54,14 +71,12 @@ def main(load_checkpoint=None, debug=False):
     )
 
 
-    with rllab_logdir(algo=algo, dirname='data/pendulum_airl'):
+    with rllab_logdir(algo=algo, dirname='models/pendulum_airl_{}'.format(job_id)):
         with tf.Session() as sess:
 
             env = GymEnv('Pendulum-v0', record_video=False, record_log=False)
             if load_checkpoint is None:
                 algo.train()
-                save_path = saver.save(sess, "data/saved_airl_lg_2.ckpt")
-                print("Model saved in path: %s" % save_path)
             else:
                 saver.restore(sess, load_checkpoint)
 
@@ -70,6 +85,7 @@ def main(load_checkpoint=None, debug=False):
             # bad_traj_sample = [i for i in range(len(experts)) if experts[i]['poisoned']][:5]
             # traj_samples = good_traj_sample + bad_traj_sample
             # influences = algo.calc_influence(t_size=5, trajectories=traj_samples)
+
 
             try:
                 itr = num_itr
@@ -84,12 +100,15 @@ def main(load_checkpoint=None, debug=False):
                     influences.append(algo.calc_influence(itr=itr,
                                                           ztest_size=200, t_size=200,
                                                           compute_hessian=True,
-                                                          trajectories=trajectories_subset))
+                                                          trajectories=trajectories_subset,
+                                                          individual_sa_pairs=True, mode="q_fn"))
                     itr = itr + 1
             except Exception as e:
                 print(str(e))
+                if debug:
+                    raise e
             finally:
-                save_file = 'results/airl_infl_poisoned_neg.pkl'
+                save_file = 'results/airl_infl_{}.pkl'.format(job_id)
                 pickle.dump(influences, open(save_file, 'wb'))
                 print('saved into %s' %(save_file))
 
@@ -105,3 +124,28 @@ def main(load_checkpoint=None, debug=False):
                 pass
             finally:
                 print("exiting simulation")
+
+
+if __name__ == "__main__":
+    args = sys.argv
+    debug = False
+    mode = "optimal"
+    fnames = list(range(391, 400))
+    id = "test"
+    if len(args) > 1:
+        debug = True if args[1] == "debug" else False
+    if len(args) > 2:
+        mode = args[2]
+        if mode == "optimal":
+            fnames.append(400)
+        if mode == "noisy":
+            fnames.append(401)
+        if mode == "neg":
+            fnames.append(402)
+        print("Using mode {}".format(mode))
+    if len(args) > 3:
+        id = args[3]
+
+    fnames = ["data/pendulum_poisoned_flex/itr_{}.pkl".format(itr) for itr in fnames]
+
+    main(debug=False, fnames=fnames, job_id=id)

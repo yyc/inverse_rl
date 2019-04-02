@@ -53,14 +53,21 @@ def load_experts(fname, max_files=float('inf'), min_return=None):
             tf.reset_default_graph()
             with tf.Session(config=config):
                 snapshot_dict = joblib.load(fname_)
-            is_poisoned = 'poisoned' in snapshot_dict
-            for p in snapshot_dict['paths']:
+            is_poisoned = 'poisoned' in snapshot_dict and snapshot_dict['poisoned']
+            for ind, p in enumerate(snapshot_dict['paths']):
                 p['poisoned'] = is_poisoned
+                # Keep track of which exact trajectory this is, so we can do leave-one-out later
+                p['path_id'] = "{}_{}".format(fname_, ind)
             paths.extend(snapshot_dict['paths'])
     else:
         with tf.Session(config=config):
             snapshot_dict = joblib.load(fname)
         paths = snapshot_dict['paths']
+        is_poisoned = 'poisoned' in snapshot_dict
+        for ind, p in enumerate(paths):
+            p['poisoned'] = is_poisoned
+            # Keep track of which exact trajectory this is, so we can do leave-one-out later
+            p['path_id'] = "{}_{}".format(fname, ind)
     tf.reset_default_graph()
 
 
@@ -72,7 +79,9 @@ def load_experts(fname, max_files=float('inf'), min_return=None):
         is_poisoned = path['poisoned']
         total_return = np.sum(returns)
         if (min_return is None) or (total_return >= min_return):
-            traj = {'observations': obses, 'actions': actions, 'poisoned': is_poisoned}
+            traj = {'observations': obses, 'actions': actions, 'poisoned': is_poisoned,
+                    'returns': returns, 'total_returns': total_return,
+                    'path_id': path['path_id']}
             trajs.append(traj)
     random.shuffle(trajs)
     print('Loaded %d trajectories' % len(trajs))

@@ -7,6 +7,7 @@ import rllab.misc.logger as logger
 class PoisonedPolicy(GaussianMLPPolicy):
     def __init__(self, name, env_spec, hidden_sizes):
         self.poison = False
+        self.mode = "random"
         super().__init__(name, env_spec, hidden_sizes=hidden_sizes)
 
     @overrides
@@ -23,7 +24,10 @@ class PoisonedPolicy(GaussianMLPPolicy):
         if not self.poison:
             return actions, info
         logger.log('generating action')
-        # Actively negate actions instead of just using random sample
-        # actions = [self.action_space.sample() for _ in observations]
-        negated_actions = np.multiply(actions, -1)
-        return negated_actions, info
+        if self.mode == "random":
+            actions = [self.action_space.sample() for _ in observations]
+            return actions, info
+        else:
+            # Actively negate actions instead of just using random sample
+            negated_actions = np.multiply(actions, -1)
+            return negated_actions, info

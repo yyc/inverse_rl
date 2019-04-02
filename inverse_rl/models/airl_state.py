@@ -54,6 +54,7 @@ class AIRL(SingleTimestepIRL):
         self.hessian_op = None
         self.l_ztest = None
         self.traj_losses = None
+        self.sa_losses = None
 
         # build energy model
         with tf.variable_scope(name) as _vs:
@@ -100,16 +101,27 @@ class AIRL(SingleTimestepIRL):
             self._make_param_ops(_vs)
 
     def calc_influence(self, paths, policy, ztest_size=25, t_size=50, logger=None,
-                       hessian_iter=10, trajectories=None, compute_hessian=True):
+                       hessian_iter=10, trajectories=None, compute_hessian=True,
+                       individual_sa_pairs=False, mode="full_loss"):
         # modified from the fit() function
         if self.fusion is not None:
             old_paths = self.fusion.sample_paths(n=len(paths))
             self.fusion.add_paths(paths)
             paths = paths+old_paths
 
+        if mode == "full_loss":
+            logger.log("Computing influence on discriminator loss")
+            # calculate influence on the full loss
+            infl_var = self.full_loss
+        elif mode == "q_fn":
+            # Calculate influence on the q function
+            logger.log("Computing influence on q function")
+            infl_var = self.qfn
+        else:
+            raise Exception("mode should be either q_fn or full_loss")
+
         start_time = time.time()
         last_time = start_time
-
 
         def log_diff(s):
             nonlocal last_time
@@ -152,28 +164,35 @@ class AIRL(SingleTimestepIRL):
 
         # Build array for full_loss that contains z_test, z_s, and all expert trajs
         # Build feed dict
-        labels = np.concatenate(
-            [interleave(np.zeros((ztest_size + t_size, 1)), np.ones((ztest_size + t_size, 1)))
-                , np.ones((len(expert_obs), 1))]
-        )
-        obs_batch = np.concatenate([interleave(obs_batch, expert_obs_batch), expert_obs], axis=0)
-        nobs_batch = np.concatenate([interleave(nobs_batch, nexpert_obs_batch), expert_obs_next], axis=0)
-        act_batch = np.concatenate([interleave(act_batch, expert_act_batch), expert_acts], axis=0)
-        nact_batch = np.concatenate([interleave(nact_batch, nexpert_act_batch), expert_acts_next], axis=0)
-        lprobs_batch = np.expand_dims(np.concatenate([interleave(lprobs_batch, expert_lprobs_batch), expert_probs], axis=0), axis=1).astype(np.float32)
+        lprobs_batch = np.expand_dims(interleave(lprobs_batch, expert_lprobs_batch), axis=1).astype(np.float32)
         feed_dict = {
-            self.act_t: act_batch,
-            self.obs_t: obs_batch,
-            self.nobs_t: nobs_batch,
-            self.nact_t: nact_batch,
-            self.labels: labels,
+            self.act_t: interleave(act_batch, expert_act_batch),
+            self.obs_t: interleave(obs_batch, expert_obs_batch),
+            self.nobs_t: interleave(nobs_batch, nexpert_obs_batch),
+            self.nact_t: interleave(nact_batch, nexpert_act_batch),
+            self.labels: interleave(np.zeros((ztest_size + t_size, 1)), np.ones((ztest_size + t_size, 1))),
             self.lprobs: lprobs_batch,
             }
 
-        # split lengths for individual expert trajectories
-        splits_lengths = [len(t['observations']) for t in expert_trajs]
+        expert_lprobs = np.expand_dims(expert_probs, axis=1).astype(np.float32)
+        experts_feed_dict = {
+            self.act_t: expert_acts,
+            self.obs_t: expert_obs,
+            self.nobs_t: expert_obs_next,
+            self.nact_t: expert_acts_next,
+            self.labels: np.ones((len(expert_obs), 1)),
+            self.lprobs: expert_lprobs,
+        }
 
-        ztests, zs, *traj_sa_losses = tf.split(self.full_loss, [ztest_size*2, 2*t_size] + splits_lengths)
+        if individual_sa_pairs:
+            logger.log("Computing influence of individual state-action pairs")
+            traj_losses = self._get_ztest_zs_sa(infl_var, experts_feed_dict, expert_trajs, log_diff=log_diff)
+        else:
+            logger.log("Computing influence of trajectories")
+            # Compute influences for entire trajectories
+            traj_losses = self._get_ztest_zs_trajectories(infl_var, experts_feed_dict, expert_trajs, log_diff=log_diff)
+
+        ztests, zs = tf.split(infl_var, [ztest_size*2, 2*t_size])
 
         log_diff('Building Ztest Gradient Op')
 
@@ -183,19 +202,8 @@ class AIRL(SingleTimestepIRL):
                 tf.gradients(ztests, self.reward_weights, stop_gradients=self.reward_weights)
             ), ztest_size * 2)
 
-        log_diff('Building trajectories gradient op')
-
-        # Trajectory losses computed by averaging the individual state-action losses in the trajectory
-        # Divide to get mean
-        if self.traj_losses is None:
-            self.traj_losses = \
-                [tf.math.divide(tf.gradients(traj, self.reward_weights, stop_gradients=self.reward_weights), tf.size(traj))
-                 for traj in traj_sa_losses]
-
-        log_diff('Running ztest and trajectory ops')
-        # Calculate the z_test losses (s_test in the Fu paper), and the trajectory losses
-        diff_lz, traj_losses = tf.get_default_session().run([self.l_ztest, self.traj_losses], feed_dict=feed_dict)
-
+        log_diff('Running ztest op')
+        diff_lz = tf.get_default_session().run(self.l_ztest, feed_dict=feed_dict)
 
         # Calculate the full hessian and invert it
         if compute_hessian:
@@ -237,6 +245,65 @@ class AIRL(SingleTimestepIRL):
         # Output the trajectories as well so we can check them manually
         return expert_trajs, conv, influences
 
+
+    def _get_ztest_zs_trajectories(self, infl_var, feed_dict, expert_trajs, log_diff=(lambda x:x)):
+        # split lengths for individual expert trajectories
+        splits_lengths = [len(t['observations']) for t in expert_trajs]
+
+        traj_sa_losses = tf.split(infl_var, splits_lengths)
+
+        log_diff('Building trajectories gradient op')
+
+        # Trajectory losses computed by averaging the individual state-action losses in the trajectory
+        # Divide to get mean
+        if self.traj_losses is None:
+            self.traj_losses = \
+                [tf.math.divide(tf.gradients(traj, self.reward_weights, stop_gradients=self.reward_weights), tf.size(traj))
+                 for traj in traj_sa_losses]
+
+        log_diff('Running ztest and trajectory ops')
+        # Calculate the z_test losses (s_test in the Fu paper), and the trajectory losses
+        traj_losses = tf.get_default_session().run(self.traj_losses, feed_dict=feed_dict)
+
+        return traj_losses
+
+    def _get_ztest_zs_sa(self, infl_var, feed_dict, expert_trajs, log_diff=(lambda x:x)):
+        num_pairs = np.sum([len(t['observations']) for t in expert_trajs])
+        traj_losses = []
+
+        # Use a minibatch of 10
+        batch_size = 10
+
+        splits_lengths = np.ones(batch_size, dtype=np.int32).tolist()
+        traj_sa_losses = tf.split(infl_var, splits_lengths)
+
+        log_diff('Building state-actions gradient op')
+
+        # Divide to get mean
+        if self.sa_losses is None:
+            self.sa_losses = \
+                [tf.gradients(traj, self.reward_weights, stop_gradients=self.reward_weights)
+                 for traj in traj_sa_losses]
+
+        log_diff('Running state-action loss gradient ops')
+        # Run this in batches to reuse the gradient ops
+
+        for key in feed_dict:
+            feed_dict[key] = np.split(feed_dict[key], num_pairs/batch_size)
+
+        for i in range(int(num_pairs/batch_size)):
+            batch_feed_dict = {k: feed_dict[k][i] for k in feed_dict}
+
+            # and the trajectory losses
+            batch_losses = tf.get_default_session().run(self.sa_losses, feed_dict=batch_feed_dict)
+            traj_losses.extend(batch_losses)
+            done = len(traj_losses)
+            if done % 100 == 0:
+                log_diff("Completed {} of {} ({}%)"
+                         .format(done, num_pairs,
+                                 done*100 / num_pairs))
+
+        return traj_losses
 
     def fit(self, paths, policy=None, batch_size=32, logger=None, lr=1e-3,**kwargs):
 
